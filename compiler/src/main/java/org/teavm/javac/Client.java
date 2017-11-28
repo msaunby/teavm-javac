@@ -17,23 +17,23 @@
 package org.teavm.javac;
 
 import com.sun.tools.javac.api.JavacTool;
-import java.io.BufferedReader;
 import java.io.ByteArrayInputStream;
 import java.io.File;
 import java.io.FileInputStream;
 import java.io.FileOutputStream;
 import java.io.IOException;
 import java.io.InputStream;
-import java.io.InputStreamReader;
 import java.io.OutputStream;
 import java.io.OutputStreamWriter;
 import java.io.PrintWriter;
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.List;
+import java.util.Locale;
 import java.util.Properties;
 import java.util.zip.ZipEntry;
 import java.util.zip.ZipInputStream;
+import javax.tools.DiagnosticListener;
 import javax.tools.JavaCompiler;
 import javax.tools.JavaFileObject;
 import javax.tools.StandardJavaFileManager;
@@ -46,22 +46,20 @@ import org.teavm.classlib.impl.JCLPlugin;
 import org.teavm.diagnostics.Problem;
 import org.teavm.diagnostics.ProblemSeverity;
 import org.teavm.interop.Async;
+import org.teavm.javac.protocol.CompilableObject;
+import org.teavm.javac.protocol.CompileMessage;
+import org.teavm.javac.protocol.CompilerDiagnosticMessage;
+import org.teavm.javac.protocol.ErrorMessage;
+import org.teavm.javac.protocol.LoadStdlibMessage;
+import org.teavm.javac.protocol.WorkerMessage;
 import org.teavm.jso.JSBody;
 import org.teavm.jso.JSObject;
 import org.teavm.jso.ajax.XMLHttpRequest;
 import org.teavm.jso.browser.Window;
-import org.teavm.jso.core.JSString;
-import org.teavm.jso.dom.events.EventListener;
 import org.teavm.jso.dom.events.MessageEvent;
-import org.teavm.jso.dom.html.HTMLDocument;
-import org.teavm.jso.dom.html.HTMLIFrameElement;
-import org.teavm.jso.dom.html.HTMLInputElement;
-import org.teavm.jso.dom.html.HTMLLinkElement;
 import org.teavm.jso.impl.JSOPlugin;
-import org.teavm.jso.json.JSON;
 import org.teavm.jso.typedarrays.ArrayBuffer;
 import org.teavm.jso.typedarrays.Int8Array;
-import org.teavm.jso.typedarrays.Uint8Array;
 import org.teavm.model.ClassHolderSource;
 import org.teavm.model.InMemoryProgramCache;
 import org.teavm.model.MethodReference;
@@ -78,94 +76,85 @@ import org.teavm.vm.TeaVMProgressFeedback;
 import org.teavm.vm.TeaVMProgressListener;
 
 public final class Client {
+    private static boolean isBusy;
+
     private Client() {
     }
 
-    public static void main(String[] args) throws IOException {
-        init();
-        HTMLDocument document = Window.current().getDocument();
-        HTMLInputElement textArea = (HTMLInputElement) document.getElementById("source-code");
-        document.getElementById("compile-button").addEventListener("click", event -> {
+    public static void main(String[] args) {
+        Window.current().addEventListener("message", (MessageEvent event) -> {
+            WorkerMessage request = (WorkerMessage) event.getData();
             try {
-                createSourceFile(textArea.getValue());
-                if (doCompile() && generateJavaScript()) {
-                    File jsFile = new File("/js-out/classes.js");
-                    if (jsFile.exists()) {
-                        StringBuilder sb = new StringBuilder();
-                        try (BufferedReader reader = new BufferedReader(new InputStreamReader(
-                                new FileInputStream(jsFile), "UTF-8"))) {
-                            while (true) {
-                                String line = reader.readLine();
-                                if (line == null) {
-                                    break;
-                                }
-                                sb.append(line).append('\n');
-                            }
-                        }
-                        executeCode(sb.toString());
-                    }
-                }
-            } catch (IOException e) {
+                processMessage(request);
+            } catch (Throwable e) {
+                log("Error occurred");
                 e.printStackTrace();
+                Window.current().postMessage(createErrorMessage(request, "Error occurred processing message: "
+                        + e.getMessage()));
             }
         });
     }
 
-    private static void init() throws IOException {
-        System.out.println("Initializing");
+    private static void processMessage(WorkerMessage message) throws Exception {
+        log("Message received: " + message.getId());
+
+        if (isBusy) {
+            log("Responded busy status");
+            Window.current().postMessage(createErrorMessage(message, "Busy"));
+            return;
+        }
+
+        isBusy = true;
+        boolean errorOccurred = false;
+        try {
+            switch (message.getCommand()) {
+                case "load-classlib":
+                    init(((LoadStdlibMessage) message).getUrl());
+                    break;
+                case "compile":
+                    createSourceFile(((CompileMessage) message).getText());
+                    doCompile(message);
+                    generateJavaScript(message);
+                    break;
+            }
+            if (!errorOccurred) {
+                respondOk(message);
+            }
+        } finally {
+            log("Done processing message: " + message.getId());
+            isBusy = false;
+        }
+    }
+
+    private static void respondOk(WorkerMessage message) {
+        WorkerMessage response = createMessage();
+        response.setCommand("ok");
+        response.setId(message.getId());
+    }
+
+    private static <T extends ErrorMessage> T createErrorMessage(WorkerMessage request, String text) {
+        T message = createMessage();
+        message.setId(request.getId());
+        message.setCommand("error");
+        message.setText(text);
+        return message;
+    }
+
+    @JSBody(script = "return {};")
+    private static native <T extends JSObject> T createMessage();
+
+    private static void init(String url) throws IOException {
+        log("Initializing");
 
         long start = System.currentTimeMillis();
-        loadTeaVMClasslib();
+        loadTeaVMClasslib(url);
         createStdlib();
         long end = System.currentTimeMillis();
 
-        System.out.println("Initialized in " + (end - start) + " ms");
+        log("Initialized in " + (end - start) + " ms");
     }
 
-    private static HTMLIFrameElement frame;
-    private static EventListener<MessageEvent> listener;
-
-    private static void executeCode(String code) {
-        if (frame != null) {
-            frame.delete();
-        }
-
-        HTMLDocument document = Window.current().getDocument();
-        frame = (HTMLIFrameElement) document.createElement("iframe");
-        frame.setSourceAddress("frame.html");
-        frame.setWidth("1px");
-        frame.setHeight("1px");
-
-        HTMLInputElement stdout = (HTMLInputElement) document.getElementById("stdout");
-        stdout.setValue("");
-
-        listener = event -> {
-            FrameCommand command = (FrameCommand) JSON.parse(((JSString) event.getData()).stringValue());
-            if (command.getCommand().equals("ready")) {
-                FrameCodeCommand codeCommand = createEmpty();
-                codeCommand.setCommand("code");
-                codeCommand.setCode(code);
-                frame.getContentWindow().postMessage(JSString.valueOf(JSON.stringify(codeCommand)), "*");
-                Window.current().removeEventListener("message", listener);
-                listener = null;
-            }
-        };
-        Window.current().addEventListener("message", listener);
-
-        document.getBody().appendChild(frame);
-    }
-
-    @JSBody(script = "return {}")
-    private static native <T extends JSObject> T createEmpty();
-
-    @JSBody(params = "data",
-            script = "return URL.createObjectURL(new Blob([data], { type: 'application/octet-stream' }));")
-    private static native String createObjectURL(Uint8Array data);
-
-    @JSBody(params = { "target", "name" }, script = "target.download = name;")
-    private static native void setDownload(HTMLLinkElement target, String name);
-
-    private static boolean doCompile() throws IOException {
+    private static boolean doCompile(WorkerMessage request) throws IOException {
         JavaCompiler compiler = JavacTool.create();
         StandardJavaFileManager fileManager = compiler.getStandardFileManager(null, null, null);
         Iterable<? extends JavaFileObject> compilationUnits = fileManager.getJavaFileObjectsFromFiles(
@@ -173,12 +162,37 @@ public final class Client {
         OutputStreamWriter out = new OutputStreamWriter(System.out);
 
         new File("/out").mkdirs();
-        JavaCompiler.CompilationTask task = compiler.getTask(out, fileManager, null,
+        JavaCompiler.CompilationTask task = compiler.getTask(out, fileManager, createDiagnosticListener(request),
                 Arrays.asList("-verbose", "-d", "/out"), null, compilationUnits);
         boolean result = task.call();
         out.flush();
 
         return result;
+    }
+
+    private static DiagnosticListener<? super JavaFileObject> createDiagnosticListener(WorkerMessage request) {
+        return diagnostic -> {
+            CompilerDiagnosticMessage response = createMessage();
+            response.setKind("compiler-diagnostic");
+            response.setId(request.getId());
+
+            CompilableObject object = createMessage();
+            object.setKind(diagnostic.getSource().getKind().name());
+            object.setName(diagnostic.getSource().getName());
+            response.setObject(object);
+
+            response.setStartPosition((int) diagnostic.getStartPosition());
+            response.setPosition((int) diagnostic.getPosition());
+            response.setEndPosition((int) diagnostic.getEndPosition());
+
+            response.setLineNumber((int) diagnostic.getColumnNumber());
+            response.setColumnNumber((int) diagnostic.getColumnNumber());
+
+            response.setCode(diagnostic.getCode());
+            response.setMessage(diagnostic.getMessage(Locale.getDefault()));
+
+            Window.current().postMessage(response);
+        };
     }
 
     private static long lastPhaseTime = System.currentTimeMillis();
@@ -195,7 +209,7 @@ public final class Client {
         stdlibClassSource = new DirectoryClasspathClassHolderSource(new File("/teavm-stdlib"), stdlibMapping);
     }
 
-    private static boolean generateJavaScript() {
+    private static boolean generateJavaScript(WorkerMessage message) {
         try {
             long start = System.currentTimeMillis();
 
@@ -216,7 +230,7 @@ public final class Client {
             new JSOPlugin().install(teavm);
             new PlatformPlugin().install(teavm);
             new JCLPlugin().install(teavm);
-            System.out.println("Plugins loaded in " + (System.currentTimeMillis() - pluginInstallationStart) + " ms");
+            log("Plugins loaded in " + (System.currentTimeMillis() - pluginInstallationStart) + " ms");
 
             teavm.entryPoint("main", new MethodReference("Hello", "main", ValueType.parse(String[].class),
                     ValueType.VOID))
@@ -224,7 +238,7 @@ public final class Client {
             File outDir = new File("/js-out");
             outDir.mkdirs();
 
-            System.out.println("TeaVM initialized in " + (System.currentTimeMillis() - start) + " ms");
+            log("TeaVM initialized in " + (System.currentTimeMillis() - start) + " ms");
 
             lastPhase = null;
             lastPhaseTime = System.currentTimeMillis();
@@ -234,7 +248,7 @@ public final class Client {
                     if (phase != lastPhase) {
                         long newPhaseTime = System.currentTimeMillis();
                         if (lastPhase != null) {
-                            System.out.println(lastPhase.name() + ": " + (newPhaseTime - lastPhaseTime) + " ms");
+                            log(lastPhase.name() + ": " + (newPhaseTime - lastPhaseTime) + " ms");
                         }
                         lastPhaseTime = newPhaseTime;
                         lastPhase = phase;
@@ -249,7 +263,7 @@ public final class Client {
             });
 
             if (lastPhase != null) {
-                System.out.println(lastPhase.name() + ": " + (System.currentTimeMillis() - lastPhaseTime) + " ms");
+                log(lastPhase.name() + ": " + (System.currentTimeMillis() - lastPhaseTime) + " ms");
             }
 
             teavm.build(outDir, "classes.js");
@@ -262,7 +276,7 @@ public final class Client {
             TeaVMProblemRenderer.describeProblems(teavm);
 
             long end = System.currentTimeMillis();
-            System.out.println("TeaVM complete in " + (end - start) + " ms");
+            log("TeaVM complete in " + (end - start) + " ms");
 
             return !hasSevere;
         } catch (RuntimeException e) {
@@ -271,11 +285,11 @@ public final class Client {
         }
     }
 
-    private static void loadTeaVMClasslib() throws IOException {
+    private static void loadTeaVMClasslib(String url) throws IOException {
         File baseDir = new File("/teavm-stdlib");
         baseDir.mkdirs();
 
-        byte[] data = downloadFile("classlib.zip");
+        byte[] data = downloadFile(url);
         try (ZipInputStream input = new ZipInputStream(new ByteArrayInputStream(data))) {
             unzip(input, baseDir);
         }
@@ -374,5 +388,9 @@ public final class Client {
         try (PrintWriter writer = new PrintWriter(new OutputStreamWriter(new FileOutputStream(file), "UTF-8"))) {
             writer.write(content);
         }
+    }
+
+    private static void log(String message) {
+        System.out.println(message);
     }
 }
