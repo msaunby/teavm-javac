@@ -1,0 +1,9 @@
+{
+    "simple": {
+        "title": "Simple examples",
+        "items": {
+            "hello": "Hello, world",
+            "hello-dom": "Hello, world (HTML edition)"
+        }
+    }
+}

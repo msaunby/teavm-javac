@@ -16,6 +16,9 @@
 
 package org.teavm.javac.ui;
 
+import java.util.HashMap;
+import java.util.LinkedHashMap;
+import java.util.Map;
 import org.teavm.interop.Async;
 import org.teavm.javac.protocol.CompilationResultMessage;
 import org.teavm.javac.protocol.CompileMessage;
@@ -31,15 +34,16 @@ import org.teavm.javac.ui.codemirror.MarkOptions;
 import org.teavm.javac.ui.codemirror.TextLocation;
 import org.teavm.jso.JSBody;
 import org.teavm.jso.JSObject;
+import org.teavm.jso.ajax.XMLHttpRequest;
 import org.teavm.jso.browser.Window;
 import org.teavm.jso.core.JSArrayReader;
 import org.teavm.jso.core.JSString;
 import org.teavm.jso.dom.events.EventListener;
 import org.teavm.jso.dom.events.MessageEvent;
+import org.teavm.jso.dom.html.HTMLButtonElement;
 import org.teavm.jso.dom.html.HTMLDocument;
 import org.teavm.jso.dom.html.HTMLElement;
 import org.teavm.jso.dom.html.HTMLIFrameElement;
-import org.teavm.jso.dom.html.HTMLInputElement;
 import org.teavm.jso.dom.html.HTMLMetaElement;
 import org.teavm.jso.json.JSON;
 import org.teavm.jso.workers.Worker;
@@ -54,17 +58,23 @@ public final class Client {
     private static final int ERROR = 2;
 
     private static Worker worker;
-    private static HTMLInputElement compileButton = HTMLDocument.current().getElementById("compile-button").cast();
+    private static HTMLButtonElement compileButton = HTMLDocument.current().getElementById("compile-button").cast();
+    private static HTMLButtonElement examplesButton = HTMLDocument.current().getElementById("show-examples").cast();
     private static HTMLElement stdoutElement;
     private static int lastId;
     private static CodeMirror codeMirror;
     private static PositionIndexer positionIndexer;
     private static HTMLElement[] gutterElements;
     private static int[] gutterSeverity;
+    private static HTMLElement examplesDialog = HTMLDocument.current().getElementById("examples");
+    private static HTMLElement examplesBackdrop;
+    private static String examplesBaseUrl = "examples/";
+    private static final Map<String, ExampleCategory> categories = new HashMap<>();
 
     public static void main(String[] args) {
         frame = (HTMLIFrameElement) HTMLDocument.current().getElementById("result");
         initEditor();
+        initExamples();
         initStdout();
         init();
         compileButton.addEventListener("click", event -> {
@@ -95,12 +105,57 @@ public final class Client {
         Window.current().listenBlur(e -> saveCode());
     }
 
+    private static void initExamples() {
+        HTMLDocument document = HTMLDocument.current();
+
+        HTMLButtonElement chooseButton = document.getElementById("choose-example").cast();
+        chooseButton.listenClick(event -> showExamples());
+
+        HTMLButtonElement cancelButton = document.getElementById("cancel-example-selection").cast();
+        cancelButton.listenClick(event -> hideExamples());
+
+        XMLHttpRequest request = XMLHttpRequest.create();
+        request.open("get", examplesBaseUrl + "examples.json");
+        request.onComplete(() -> {
+            loadExamples(request.getResponse().cast());
+            examplesButton.setDisabled(false);
+        });
+        request.send();
+    }
+
+    private static void loadExamples(JsonObject object) {
+        for (String key : keys(object)) {
+            ExampleCategory category = new ExampleCategory();
+            JsonObject categoryObject = object.get(key);
+            category.title = categoryObject.getAsString("title");
+            categories.put(key, category);
+        }
+    }
+
+    @JSBody(params = "o", script = "return Object.keys(o);")
+    private static native String[] keys(JSObject o);
+
+    private static void showExamples() {
+        HTMLDocument document = HTMLDocument.current();
+        examplesDialog.getStyle().setProperty("display", "block");
+        examplesDialog.setClassName("modal fade in");
+        examplesBackdrop = document.createElement("div").withAttr("class", "modal-backdrop fade in");
+        document.getBody().appendChild(examplesBackdrop);
+    }
+
+    private static void hideExamples() {
+        examplesDialog.getStyle().setProperty("display", "none");
+        examplesDialog.setClassName("modal fade");
+        examplesBackdrop.delete();
+        examplesBackdrop = null;
+    }
+
     private static void initStdout() {
         stdoutElement = HTMLDocument.current().getElementById("stdout");
         Window.current().addEventListener("message", (MessageEvent event) -> {
-            FrameCommand request = (FrameCommand) JSON.parse(((JSString) event.getData()).stringValue());
+            FrameCommand request = JSON.parse(((JSString) event.getData()).stringValue()).cast();
             if (request.getCommand().equals("stdout")) {
-                FrameStdoutCommand stdoutCommand = (FrameStdoutCommand) request;
+                FrameStdoutCommand stdoutCommand = request.cast();
                 addToConsole(stdoutCommand.getLine(), false);
             }
         });
@@ -179,14 +234,14 @@ public final class Client {
             WorkerMessage response = waitForResponse(request);
             switch (response.getCommand()) {
                 case "compilation-complete": {
-                    CompilationResultMessage compilationResult = (CompilationResultMessage) response;
+                    CompilationResultMessage compilationResult = response.cast();
                     return compilationResult.getStatus().equals("successful") ? compilationResult.getScript() : null;
                 }
                 case "compiler-diagnostic":
-                    handleCompilerDiagnostic((CompilerDiagnosticMessage) response);
+                    handleCompilerDiagnostic(response.cast());
                     break;
                 case "diagnostic":
-                    handleDiagnostic((TeaVMDiagnosticMessage) response);
+                    handleDiagnostic(response.cast());
                     break;
             }
         }
@@ -340,7 +395,7 @@ public final class Client {
                     if (!isMessage(event.getData())) {
                         return;
                     }
-                    WorkerMessage message = (WorkerMessage) event.getData();
+                    WorkerMessage message = event.getData().cast();
                     if (message.getId().equals(request.getId())) {
                         worker.removeEventListener("message", listener);
                         callback.complete(message);
@@ -371,7 +426,7 @@ public final class Client {
         frame.setClassName("result");
 
         listener = event -> {
-            FrameCommand command = (FrameCommand) JSON.parse(((JSString) event.getData()).stringValue());
+            FrameCommand command = JSON.parse(((JSString) event.getData()).stringValue()).cast();
             if (command.getCommand().equals("ready")) {
                 FrameCodeCommand codeCommand = createJs();
                 codeCommand.setCommand("code");
@@ -395,5 +450,10 @@ public final class Client {
 
     private static void saveCode() {
         Window.current().getLocalStorage().setItem("teavm-java-code", codeMirror.getValue());
+    }
+
+    static class ExampleCategory {
+        String title;
+        Map<String, String> items = new LinkedHashMap<>();
     }
 }
