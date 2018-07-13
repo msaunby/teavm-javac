@@ -1,0 +1,18 @@
+{
+    "simple": {
+        "title": "Simple examples",
+        "items": {
+            "hello": "Hello, world",
+            "hello-dom": "Hello, world (HTML edition)",
+            "fib": "Fibonacci sequence",
+            "threads": "Threads"
+        }
+    },
+    "longer": {
+        "title": "Longer examples",
+        "items": {
+            "life": "Conway's Game of Life",
+            "video": "Video player"
+        }
+    }
+}

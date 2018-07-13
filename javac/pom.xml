@@ -47,7 +47,22 @@
                 <configuration>
                   <tasks>
                     <mkdir dir="${project.build.directory}/langtools"/>
+                    <!--
                     <get src="http://hg.openjdk.java.net/jdk8u/jdk8u/langtools/archive/${jdk.langtools.revision}.zip"
+                         dest="${project.build.directory}/langtools/${jdk.langtools.revision}.zip"
+                         usetimestamp="true" skipexisting="true"/>
+                    <unzip src="${project.build.directory}/langtools/${jdk.langtools.revision}.zip"
+                           dest="${project.build.directory}/langtools" />
+                    -->
+                    <!-- use a local copy 
+                    <get src="file:../../langtools-${jdk.langtools.revision}.zip"
+                         dest="${project.build.directory}/langtools/langtools-${jdk.langtools.revision}.zip"
+                         usetimestamp="true" skipexisting="true"/>
+                    <unzip src="${project.build.directory}/langtools/langtools-${jdk.langtools.revision}.zip"
+                           dest="${project.build.directory}/langtools" />
+                    -->
+                    <!-- use GitHub hosted copy -->
+                    <get src="https://github.com/msaunby/jdk8u-langtools/raw/master/langtools-${jdk.langtools.revision}.zip"
                          dest="${project.build.directory}/langtools/${jdk.langtools.revision}.zip"
                          usetimestamp="true" skipexisting="true"/>
                     <unzip src="${project.build.directory}/langtools/${jdk.langtools.revision}.zip"
