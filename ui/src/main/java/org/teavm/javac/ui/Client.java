@@ -161,7 +161,7 @@ public final class Client {
         progressElement.getStyle().setProperty("display", "block");
 
         XMLHttpRequest xhr = XMLHttpRequest.create();
-        xhr.open("get", examplesBaseUrl + "/" + category + "/" + item + ".java");
+        xhr.open("get", examplesBaseUrl + category + "/" + item + ".java");
         xhr.onComplete(() -> {
             String code = xhr.getResponseText();
             codeMirror.setValue(code);
